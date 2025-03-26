@@ -5,36 +5,15 @@ import { Suspense, useEffect, useState, useCallback } from 'react';
 import { useStore } from '@/lib/store';
 import * as THREE from 'three';
 import { ModelTransform } from '@/components/scene/ModelEditor';
+import { LoadingSpinner } from '../ui/loading';
 
-function LoadingSpinner() {
-  const { camera } = useThree();
-  const [rotation, setRotation] = useState(0);
-
-  useEffect(() => {
-    let animationFrameId: number;
-    
-    const animate = () => {
-      setRotation(prev => (prev + 0.01) % (Math.PI * 2));
-      animationFrameId = requestAnimationFrame(animate);
-    };
-    
-    animate();
-    return () => {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-    };
-  }, []);
-
+const LoadingSpinner = () => {
   return (
-    <group position={[0, 0, -5]} rotation={[0, rotation, 0]}>
-      <mesh>
-        <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color={new THREE.Color("#4f46e5")} wireframe />
-      </mesh>
-    </group>
+    <div className="flex items-center justify-center">
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+    </div>
   );
-}
+};
 
 interface ModelViewerProps {
   url: string;
@@ -45,7 +24,8 @@ interface ModelViewerProps {
 function ModelViewer({ url, transform, onError }: ModelViewerProps) {
   const [modelUrl, setModelUrl] = useState<string>('/models/cube.gltf');
   const [isLoading, setIsLoading] = useState(true);
-  const { gl } = useThree();
+  const { gl, scene } = useThree();
+  const [contextLost, setContextLost] = useState(false);
 
   useEffect(() => {
     const setupModelUrl = async () => {
@@ -194,6 +174,32 @@ function ModelViewer({ url, transform, onError }: ModelViewerProps) {
       console.error("Error applying transformations:", error);
     }
   }, [gltfScene, transform]);
+
+  useEffect(() => {
+    const handleContextLost = () => {
+      console.log(" WebGL context lost");
+      setContextLost(true);
+    };
+
+    const handleContextRestored = () => {
+      console.log(" WebGL context restored");
+      setContextLost(false);
+    };
+
+    gl.domElement.addEventListener('webglcontextlost', handleContextLost);
+    gl.domElement.addEventListener('webglcontextrestored', handleContextRestored);
+
+    return () => {
+      gl.domElement.removeEventListener('webglcontextlost', handleContextLost);
+      gl.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
+    };
+  }, [gl]);
+
+  useEffect(() => {
+    if (contextLost) {
+      onError(new Error('WebGL context lost. Please refresh the page.'));
+    }
+  }, [contextLost, onError]);
 
   if (isLoading) {
     return <LoadingSpinner />;
