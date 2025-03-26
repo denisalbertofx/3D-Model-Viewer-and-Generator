@@ -1,140 +1,103 @@
-// Follow Supabase Edge Function format
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "*",
-  "Access-Control-Max-Age": "86400",
-  "Access-Control-Expose-Headers": "Content-Length, Content-Type"
-};
+// Importamos las dependencias necesarias de Supabase
+import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { cors } from 'https://deno.land/x/cors@v1.2.2/mod.ts';
 
-Deno.serve(async (req) => {
-  // Handle CORS preflight requests
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders
-    });
-  }
-
+// Función para hacer proxy de modelos 3D
+const proxyModel = async (req: Request) => {
   try {
-    // Get the model URL and auth token from query parameters
-    const url = new URL(req.url);
-    const modelUrl = url.searchParams.get("url");
-    const authToken = url.searchParams.get("token");
-
-    if (!modelUrl) {
+    // Obtener la URL del modelo desde los parámetros de consulta
+    const url = new URL(req.url).searchParams.get('url');
+    
+    if (!url) {
       return new Response(
-        JSON.stringify({ error: "Model URL is required" }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders
-          }
-        }
+        JSON.stringify({ error: 'URL parameter is required' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
-
-    console.log("Proxying request for:", modelUrl);
-
-    // Set up headers for the model request
-    const headers = new Headers();
     
-    // Always include the Meshy API key for their URLs regardless of other tokens
-    if (modelUrl.includes("meshy.ai")) {
-      const MESHY_API_KEY = Deno.env.get("MESHY_API_KEY") || "";
-      if (MESHY_API_KEY) {
-        console.log("Using Meshy API key for authentication");
-        headers.set("Authorization", `Bearer ${MESHY_API_KEY}`);
-      }
-    } else if (authToken) {
-      // For other URLs, use the provided auth token
-      console.log("Using provided auth token");
-      headers.set("Authorization", `Bearer ${authToken}`);
-    }
-
-    // Use user-agent to mimic a browser request
-    headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-    headers.set("Accept", "*/*");
-
-    console.log("Request headers:", Object.fromEntries(headers.entries()));
-
-    // Fetch the model
-    const modelResponse = await fetch(modelUrl, {
-      headers,
-      redirect: 'follow'
+    console.log('Proxying model URL:', url);
+    
+    // Configurar los encabezados para la solicitud
+    const headers = new Headers({
+      'Accept': 'model/gltf-binary,model/gltf+json,*/*',
+      'User-Agent': 'Supabase Edge Function'
     });
-
-    if (!modelResponse.ok) {
-      console.error(`Model fetch failed: ${modelResponse.status} ${modelResponse.statusText}`);
-      const errorText = await modelResponse.text();
-      console.error("Error response:", errorText);
-      
-      return new Response(
-        JSON.stringify({ 
-          error: `Failed to fetch model: ${modelResponse.status} ${modelResponse.statusText}`,
-          details: errorText
-        }),
-        {
-          status: modelResponse.status,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders
-          }
-        }
-      );
-    }
-
-    // Get the model data
-    const modelData = await modelResponse.arrayBuffer();
     
-    // Determine content type
-    let contentType = modelResponse.headers.get("Content-Type");
-    if (!contentType) {
-      // Set default content type based on URL extension
-      if (modelUrl.endsWith('.glb')) {
-        contentType = 'model/gltf-binary';
-      } else if (modelUrl.endsWith('.gltf')) {
-        contentType = 'model/gltf+json';
-      } else if (modelUrl.endsWith('.obj')) {
-        contentType = 'model/obj';
-      } else if (modelUrl.endsWith('.fbx')) {
-        contentType = 'model/fbx';
-      } else if (modelUrl.endsWith('.stl')) {
-        contentType = 'model/stl';
-      } else {
-        contentType = 'application/octet-stream';
-      }
+    // Obtener el token de autenticación si está presente
+    const authHeader = req.headers.get('Authorization');
+    if (authHeader) {
+      headers.set('Authorization', authHeader);
     }
-
-    console.log("Response content type:", contentType);
-    console.log("Response size:", modelData.byteLength);
-
-    // Return the model data with appropriate headers
+    
+    // Realizar la solicitud a la URL del modelo
+    const modelResponse = await fetch(url, {
+      headers,
+      method: 'GET'
+    });
+    
+    if (!modelResponse.ok) {
+      throw new Error(`Failed to fetch model: ${modelResponse.status} ${modelResponse.statusText}`);
+    }
+    
+    // Obtener los encabezados y el cuerpo de la respuesta
+    const modelData = await modelResponse.arrayBuffer();
+    const contentType = modelResponse.headers.get('content-type') || 'application/octet-stream';
+    
+    // Configurar encabezados para la respuesta
+    const responseHeaders = new Headers({
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': '*'
+    });
+    
+    // Devolver la respuesta con el modelo
     return new Response(modelData, {
       status: 200,
-      headers: {
-        ...corsHeaders,
-        "Content-Type": contentType,
-        "Content-Length": modelData.byteLength.toString(),
-        "Cache-Control": "public, max-age=31536000"
-      }
+      headers: responseHeaders
     });
-
+    
   } catch (error) {
-    console.error("Proxy error:", error);
+    console.error('Error proxying model:', error);
+    
+    // Devolver un error
     return new Response(
       JSON.stringify({ 
-        error: error.message || "Failed to proxy model request",
-        stack: error.stack
+        error: 'Failed to proxy model', 
+        message: error instanceof Error ? error.message : 'Unknown error' 
       }),
-      {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders
-        }
+      { 
+        status: 500, 
+        headers: { 
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': '*'
+        } 
       }
     );
   }
-});
+};
+
+// Manejar solicitudes CORS
+const handleCors = (req: Request) => {
+  // Para solicitudes OPTIONS (preflight), devolver encabezados CORS
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400'
+      }
+    });
+  }
+  
+  // Para otras solicitudes, continuar con el proxy
+  return proxyModel(req);
+};
+
+// Iniciar el servidor con la función de manejo
+serve(handleCors);

@@ -1,10 +1,11 @@
 import React from 'react';
-import { Canvas, useThree, useFrame } from '@react-three/fiber';
-import { OrbitControls, useGLTF } from '@react-three/drei';
-import { Suspense, useEffect, useState, useCallback } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls } from '@react-three/drei';
+import { Suspense, useEffect, useState, useCallback, useRef } from 'react';
 import { useStore } from '@/lib/store';
 import * as THREE from 'three';
 import { ModelTransform } from '@/components/scene/ModelEditor';
+import { ModelViewer, DefaultModel } from './ModelViewer';
 
 // Loading spinner para Three.js (dentro del canvas)
 const ThreeLoadingSpinner = () => {
@@ -40,215 +41,6 @@ const DOMLoadingSpinner = () => {
   );
 };
 
-interface ModelViewerProps {
-  url: string;
-  transform?: ModelTransform;
-  onError: (error: Error) => void;
-}
-
-function ModelViewer({ url, transform, onError }: ModelViewerProps) {
-  const [modelUrl, setModelUrl] = useState<string>('/models/cube.gltf');
-  const [isLoading, setIsLoading] = useState(true);
-  const { gl, scene } = useThree();
-  const [contextLost, setContextLost] = useState(false);
-
-  useEffect(() => {
-    const setupModelUrl = async () => {
-      setIsLoading(true);
-      try {
-        if (!url) {
-          throw new Error('No model URL provided');
-        }
-
-        console.log('Setting up model URL:', url);
-
-        if (url.startsWith('http')) {
-          // Si es una URL de Meshy, intentar cargarla directamente
-          if (url.includes('meshy.ai') || url.includes('storage.googleapis.com')) {
-            console.log('Loading Meshy model:', url);
-            setModelUrl(url);
-          } else {
-            // Para otras URLs externas, verificar accesibilidad
-            try {
-              const response = await fetch(url, { 
-                method: 'HEAD',
-                headers: {
-                  'Accept': 'model/gltf-binary,model/gltf+json,*/*'
-                }
-              });
-              if (!response.ok) {
-                throw new Error(`Model URL not accessible: ${response.status}`);
-              }
-              setModelUrl(url);
-              console.log('External model URL verified:', url);
-            } catch (error) {
-              console.error('Error verifying model URL:', error);
-              throw new Error('Model URL not accessible');
-            }
-          }
-        } else {
-          // Si es una ruta local, usar la ruta relativa
-          const localUrl = url.startsWith('/') ? url : `/${url}`;
-          try {
-            const response = await fetch(localUrl, { method: 'HEAD' });
-            if (!response.ok) {
-              throw new Error(`Local model not found: ${response.status}`);
-            }
-            setModelUrl(localUrl);
-            console.log('Local model URL verified:', localUrl);
-          } catch (error) {
-            console.error('Error verifying local model:', error);
-            throw new Error('Local model not found');
-          }
-        }
-      } catch (error) {
-        console.error('Error setting up model URL:', error);
-        onError(error instanceof Error ? error : new Error('Failed to setup model URL'));
-        setModelUrl('/models/cube.gltf');
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    
-    setupModelUrl();
-  }, [url, onError]);
-
-  const { scene: gltfScene } = useGLTF(modelUrl, true, undefined, (error) => {
-    console.error('GLTF loading error:', error);
-    onError(new Error('Failed to load model: Check console for details'));
-  });
-
-  useEffect(() => {
-    if (!gltfScene) {
-      console.warn('No scene loaded from GLTF');
-      return;
-    }
-
-    try {
-      console.log('Processing loaded model:', gltfScene);
-      
-      // Centrar y escalar el modelo
-      const box = new THREE.Box3().setFromObject(gltfScene);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = maxDim > 0 ? 2 / maxDim : 1;
-      
-      gltfScene.position.x = -center.x * scale;
-      gltfScene.position.y = -center.y * scale;
-      gltfScene.position.z = -center.z * scale;
-      gltfScene.scale.set(scale, scale, scale);
-      
-      // Configurar materiales
-      gltfScene.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const mesh = child as THREE.Mesh;
-          if (mesh.material) {
-            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            materials.forEach(material => {
-              if (material instanceof THREE.Material) {
-                material.side = THREE.DoubleSide;
-                if (material instanceof THREE.MeshStandardMaterial) {
-                  material.metalness = 0.5;
-                  material.roughness = 0.5;
-                }
-              }
-            });
-          }
-        }
-      });
-      
-      console.log('Model processed successfully');
-      setIsLoading(false);
-    } catch (error) {
-      console.error("Error processing model:", error);
-      onError(error instanceof Error ? error : new Error('Failed to process model'));
-    }
-  }, [gltfScene, onError]);
-
-  // Aplicar transformaciones del editor
-  useEffect(() => {
-    if (!gltfScene || !transform) return;
-    
-    try {
-      gltfScene.scale.multiplyScalar(transform.scale);
-      gltfScene.rotation.x = THREE.MathUtils.degToRad(transform.rotationX);
-      gltfScene.rotation.y = THREE.MathUtils.degToRad(transform.rotationY);
-      gltfScene.rotation.z = THREE.MathUtils.degToRad(transform.rotationZ);
-      
-      gltfScene.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const mesh = child as THREE.Mesh;
-          if (mesh.material) {
-            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            materials.forEach(material => {
-              if (material instanceof THREE.MeshStandardMaterial) {
-                if (transform.color) {
-                  material.color = new THREE.Color(transform.color);
-                }
-                if (transform.wireframe !== undefined) {
-                  material.wireframe = transform.wireframe;
-                }
-              }
-            });
-          }
-        }
-      });
-    } catch (error) {
-      console.error("Error applying transformations:", error);
-    }
-  }, [gltfScene, transform]);
-
-  useEffect(() => {
-    const handleContextLost = () => {
-      console.log(" WebGL context lost");
-      setContextLost(true);
-    };
-
-    const handleContextRestored = () => {
-      console.log(" WebGL context restored");
-      setContextLost(false);
-    };
-
-    gl.domElement.addEventListener('webglcontextlost', handleContextLost);
-    gl.domElement.addEventListener('webglcontextrestored', handleContextRestored);
-
-    return () => {
-      gl.domElement.removeEventListener('webglcontextlost', handleContextLost);
-      gl.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
-    };
-  }, [gl]);
-
-  useEffect(() => {
-    if (contextLost) {
-      onError(new Error('WebGL context lost. Please refresh the page.'));
-    }
-  }, [contextLost, onError]);
-
-  if (isLoading) {
-    return <ThreeLoadingSpinner />;
-  }
-
-  if (!gltfScene) {
-    console.warn('Rendering default model due to missing scene');
-    return <DefaultModel />;
-  }
-
-  return <primitive object={gltfScene} />;
-}
-
-function DefaultModel() {
-  return (
-    <group>
-      <mesh>
-        <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color={new THREE.Color("#4f46e5")} />
-      </mesh>
-    </group>
-  );
-}
-
 interface ThreeSceneProps {
   modelTransform?: ModelTransform;
 }
@@ -259,12 +51,30 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
   const [fallbackToDefault, setFallbackToDefault] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [contextLost, setContextLost] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const maxRetries = 3;
+  
+  // Referencia para mantener el timer de reintento
+  const retryTimerRef = useRef<number | null>(null);
 
   const handleError = useCallback((e: Error) => {
     console.error("Failed to load model:", e);
     setError(`Failed to load model: ${e.message}`);
     setFallbackToDefault(true);
     setIsLoading(false);
+  }, []);
+
+  const handleLoadingChange = useCallback((loading: boolean) => {
+    setIsLoading(loading);
+  }, []);
+
+  // Limpiar temporizadores cuando el componente se desmonta
+  useEffect(() => {
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -274,17 +84,49 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
       setFallbackToDefault(false);
       setIsLoading(true);
       setContextLost(false);
+      setRetryCount(0);
+      
+      // Limpiar cualquier temporizador anterior
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     }
   }, [currentModel]);
 
   const handleContextLost = useCallback(() => {
     console.warn('WebGL context lost');
     setContextLost(true);
-  }, []);
+    
+    // Limpiar cualquier temporizador anterior
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+    }
+    
+    // Intentar recuperar el contexto automáticamente después de un breve retraso
+    if (retryCount < maxRetries) {
+      retryTimerRef.current = window.setTimeout(() => {
+        console.log(`Attempting to restore WebGL context (attempt ${retryCount + 1}/${maxRetries})`);
+        setRetryCount(prev => prev + 1);
+        // Forzar la recreación del canvas
+        setContextLost(false);
+      }, 2000);
+    } else {
+      setError('WebGL context could not be restored. Please refresh the page.');
+    }
+  }, [retryCount, maxRetries]);
 
   const handleContextRestored = useCallback(() => {
     console.log('WebGL context restored');
     setContextLost(false);
+    setRetryCount(0);
+    setError(null);
+    
+    // Limpiar el temporizador cuando se restaura
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
   }, []);
 
   return (
@@ -293,7 +135,19 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
         <div className="absolute top-0 left-0 right-0 bg-red-500/90 backdrop-blur-sm text-white p-3 text-center z-10 shadow-lg rounded-md m-2">
           {error}
           <button 
-            onClick={() => setError(null)}
+            onClick={() => {
+              setError(null);
+              setRetryCount(0);
+              setContextLost(false);
+              
+              // Forzar una recarga del canvas
+              const timer = setTimeout(() => {
+                setIsLoading(true);
+                setTimeout(() => setIsLoading(false), 100);
+              }, 100);
+              
+              return () => clearTimeout(timer);
+            }}
             className="ml-2 text-white/80 hover:text-white underline"
           >
             Dismiss
@@ -303,7 +157,15 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
 
       {contextLost && (
         <div className="absolute top-0 left-0 right-0 bg-yellow-500/90 backdrop-blur-sm text-white p-3 text-center z-10 shadow-lg rounded-md m-2">
-          WebGL context lost. Trying to recover...
+          WebGL context lost. {retryCount < maxRetries ? `Attempting to recover (${retryCount + 1}/${maxRetries})...` : 'Please refresh the page.'}
+          {retryCount >= maxRetries && (
+            <button 
+              onClick={() => window.location.reload()}
+              className="ml-2 text-white/80 hover:text-white underline"
+            >
+              Refresh Now
+            </button>
+          )}
         </div>
       )}
       
@@ -315,8 +177,14 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
             alpha: true,
             preserveDrawingBuffer: true,
             powerPreference: "high-performance",
-            failIfMajorPerformanceCaveat: false
+            failIfMajorPerformanceCaveat: false,
+            depth: true,
+            stencil: true,
+            premultipliedAlpha: false
           }}
+          // Reducir la sobrecarga en el sistema
+          dpr={[1, 1.5]} 
+          performance={{ min: 0.5 }}
           onCreated={({ gl }) => {
             gl.setClearColor(0x000000, 0);
             console.log('Canvas created with WebGL context:', gl);
@@ -345,6 +213,7 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
                 url={currentModel.model_url}
                 transform={modelTransform}
                 onError={handleError}
+                onLoadingChange={handleLoadingChange}
               />
             ) : (
               <DefaultModel />
