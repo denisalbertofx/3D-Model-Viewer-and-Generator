@@ -335,138 +335,225 @@ export const useStore = create<UserState>((set, get) => ({
     return url;
   },
   
-  uploadModelToStorage: async (modelUrl: string, modelId: string) => {
-    if (!modelUrl) throw new Error('Model URL is required');
-    
+  uploadModelToStorage: async (modelUrl: string, modelId: string): Promise<string> => {
     try {
-      // Create a unique filename that preserves file extension
-      const extension = modelUrl.split('.').pop() || 'glb';
-      const filename = `${modelId}.${extension}`;
-      const filePath = `models/${filename}`;
+      console.log('Subiendo modelo a Storage...', { modelUrl, modelId });
       
-      // First, try to download the file from the original URL
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('No active session found');
-      
-      // We need to fetch the file through our proxy to avoid CORS issues
-      const proxyUrl = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/proxy-model`);
-      proxyUrl.searchParams.set('url', modelUrl);
-      proxyUrl.searchParams.set('token', session.access_token);
-      
-      console.log("Fetching model file from proxy:", proxyUrl.toString());
-      
-      // Fetch the file data
-      const response = await fetch(proxyUrl.toString());
-      if (!response.ok) {
-        throw new Error(`Failed to fetch model file: ${response.statusText}`);
+      // Si la URL ya tiene un formato storage:// o es una URL local, no necesitamos descargarla
+      if (modelUrl.startsWith('storage://') || modelUrl.startsWith('/')) {
+        console.log('URL ya está en formato storage o es local, no es necesario subirla:', modelUrl);
+        return modelUrl;
       }
       
-      // Convert to blob
-      const modelBlob = await response.blob();
+      // Crear un nombre de archivo seguro basado en el ID del modelo
+      const safeFileName = `models/${modelId}.glb`;
       
-      // Make sure the bucket exists
-      await ensureBucketExists(MODEL_BUCKET, true);
+      // Verificar si el bucket existe, si no, intentar crearlo
+      try {
+        const { data: bucketData, error: bucketError } = await supabase.storage.getBucket('models');
+        
+        if (bucketError) {
+          console.warn('Error al verificar bucket:', bucketError);
+          
+          // Intentar crear el bucket si no existe
+          const { data: createData, error: createError } = await supabase.storage.createBucket('models', {
+            public: true,
+            fileSizeLimit: 100000000, // 100MB
+          });
+          
+          if (createError) {
+            console.error('Error al crear bucket de almacenamiento:', createError);
+            throw new Error(`No se pudo crear el bucket de almacenamiento: ${createError.message}`);
+          }
+          
+          console.log('Bucket creado correctamente:', createData);
+        } else {
+          console.log('Bucket existente:', bucketData);
+        }
+      } catch (error) {
+        console.error('Error al verificar/crear bucket:', error);
+      }
       
-      // Upload the file to Supabase Storage
-      const { data, error } = await supabase.storage
-        .from(MODEL_BUCKET)
-        .upload(filePath, modelBlob, {
-          contentType: modelBlob.type,
-          cacheControl: '3600',
-          upsert: true
-        });
+      // Descargar el modelo desde la URL externa
+      console.log('Descargando modelo desde URL externa...');
       
-      if (error) throw error;
-      
-      // Get the public URL
-      const { data: { publicUrl } } = supabase.storage
-        .from(MODEL_BUCKET)
-        .getPublicUrl(filePath);
-      
-      // Update the model in the database with the new file path
-      await supabase
-        .from('models')
-        .update({
-          file_path: filePath,
-          model_url: publicUrl
-        })
-        .eq('id', modelId);
-      
-      console.log("Model file uploaded to Storage:", publicUrl);
-      return publicUrl;
-      
+      try {
+        // Usar la función proxy para modelos si está disponible
+        const proxyUrl = `/api/proxy-model?url=${encodeURIComponent(modelUrl)}`;
+        
+        // Intentar descargar a través del proxy
+        const modelResponse = await fetch(proxyUrl);
+        
+        if (!modelResponse.ok) {
+          // Si el proxy falla, intentar directamente
+          console.warn(`Proxy falló (${modelResponse.status}), intentando descarga directa...`);
+          const directResponse = await fetch(modelUrl);
+          
+          if (!directResponse.ok) {
+            throw new Error(`No se pudo descargar el modelo: ${directResponse.status}`);
+          }
+          
+          const modelBlob = await directResponse.blob();
+          
+          // Subir el blob a Supabase Storage
+          console.log(`Subiendo modelo a Storage (tamaño: ${modelBlob.size} bytes)...`);
+          
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('models')
+            .upload(safeFileName, modelBlob, {
+              contentType: 'model/gltf-binary',
+              upsert: true,
+              cacheControl: '31536000', // 1 año
+            });
+          
+          if (uploadError) {
+            console.error('Error al subir modelo a Storage:', uploadError);
+            throw new Error(`Error al subir modelo: ${uploadError.message}`);
+          }
+          
+          console.log('Modelo subido exitosamente:', uploadData);
+          
+          // Generar URL pública
+          const { data: publicUrlData } = supabase.storage
+            .from('models')
+            .getPublicUrl(safeFileName);
+          
+          return publicUrlData.publicUrl;
+        } else {
+          // Si el proxy funciona, usar esa respuesta
+          const modelBlob = await modelResponse.blob();
+          
+          // Subir el blob a Supabase Storage
+          console.log(`Subiendo modelo a Storage (tamaño: ${modelBlob.size} bytes)...`);
+          
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('models')
+            .upload(safeFileName, modelBlob, {
+              contentType: 'model/gltf-binary',
+              upsert: true,
+              cacheControl: '31536000', // 1 año
+            });
+          
+          if (uploadError) {
+            console.error('Error al subir modelo a Storage:', uploadError);
+            throw new Error(`Error al subir modelo: ${uploadError.message}`);
+          }
+          
+          console.log('Modelo subido exitosamente:', uploadData);
+          
+          // Generar URL pública
+          const { data: publicUrlData } = supabase.storage
+            .from('models')
+            .getPublicUrl(safeFileName);
+          
+          return publicUrlData.publicUrl;
+        }
+      } catch (error) {
+        console.error('Error al subir modelo a storage:', error);
+        // En caso de error, devolver la URL original
+        return modelUrl;
+      }
     } catch (error) {
-      console.error("Failed to upload model to storage:", error);
-      throw error;
+      console.error('Error al subir el modelo a Storage:', error);
+      // En caso de error general, devolver la URL original
+      return modelUrl;
     }
   },
   
-  generateModel: async (prompt: string) => {
-    const { user, profile } = get();
-    if (!user) throw new Error('Debes iniciar sesión para generar modelos');
-    if (!profile) throw new Error('No se encontró tu perfil');
-    if (profile.credits < 1) throw new Error('No tienes suficientes créditos');
-        
-    set({ isGenerating: true });
-    
+  generateModel: async (prompt: string): Promise<any> => {
     try {
-      console.log("Iniciando generación de modelo con prompt:", prompt);
+      set({ isGenerating: true });
+      console.log('Iniciando generación de modelo con prompt:', prompt);
       
-      // Call the Supabase Edge Function
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-model`;
-      console.log("URL de la función Edge:", apiUrl);
+      // URL de la función Edge de Supabase para generar modelos
+      const functionUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-model`;
+      console.log('URL de la función Edge:', functionUrl);
       
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
-        throw new Error('No se encontró una sesión activa');
+      // Obtener sesión para autenticación
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData?.session) {
+        throw new Error('No hay sesión activa');
       }
       
-      console.log("Llamando a la función Edge...");
-      const response = await fetch(apiUrl, {
+      // Llamar a la función Edge para generar el modelo
+      console.log('Llamando a la función Edge...');
+      const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${sessionData.session.access_token}`
         },
-        body: JSON.stringify({
-          prompt,
-          userId: user.id
-        }),
+        body: JSON.stringify({ prompt })
       });
       
       if (!response.ok) {
         const errorData = await response.json();
-        console.error("Error en la función Edge:", errorData);
-        throw new Error(errorData.error || 'Error al generar el modelo');
+        throw new Error(`Error al generar modelo: ${errorData.error || response.statusText}`);
       }
       
-      const result = await response.json();
-      console.log("Respuesta de la función Edge:", result);
+      // Procesar respuesta de la función Edge
+      const data = await response.json();
+      console.log('Respuesta de la función Edge:', data);
       
-      // If model generation was successful and we have a URL, upload it to storage
-      if (result.model_url && result.model_id) {
-        try {
-          console.log("Subiendo modelo a Storage...");
-          await get().uploadModelToStorage(result.model_url, result.model_id);
-        } catch (storageError) {
-          console.error("Error al subir el modelo a Storage:", storageError);
-          // Continuamos incluso si falla la subida a Storage, ya que tenemos la URL externa
+      if (!data.success) {
+        throw new Error(`Error al generar modelo: ${data.message || 'Error desconocido'}`);
+      }
+      
+      // Extraer datos del modelo generado
+      const { model_id, model_url } = data;
+      
+      // Subir el modelo a Storage para tener una copia local
+      console.log('Subiendo modelo a Storage...');
+      let finalModelUrl = model_url;
+      
+      try {
+        // Intentar subir el modelo a Storage usando la función del store
+        const storageUrl = await get().uploadModelToStorage(model_url, model_id);
+        
+        if (storageUrl && storageUrl !== model_url) {
+          console.log('Modelo subido a Storage exitosamente:', storageUrl);
+          finalModelUrl = storageUrl;
+          
+          // Actualizar URL en la base de datos
+          const { error: updateError } = await supabase
+            .from('models')
+            .update({
+              model_url: finalModelUrl
+            })
+            .eq('id', model_id);
+          
+          if (updateError) {
+            console.error('Error al actualizar URL del modelo en la base de datos:', updateError);
+          } else {
+            console.log('URL del modelo actualizada en la base de datos');
+          }
+        } else {
+          console.log('Se utilizará la URL original del modelo:', model_url);
         }
+      } catch (storageError) {
+        console.error('Error al subir modelo a Storage:', storageError);
+        // Continuar con la URL original si hay error
       }
       
-      // Refresh models to include the newly created one
-      console.log("Actualizando lista de modelos...");
+      // Actualizar lista de modelos
+      console.log('Actualizando lista de modelos...');
       await get().loadModels();
-      await get().loadProfile(); // Also reload profile to get updated credits
       
-      return result;
+      // Establecer el modelo recién generado como el actual
+      get().setCurrentModel(model_id);
       
-    } catch (error) {
-      console.error("Error en generateModel:", error);
-      throw error;
-    } finally {
+      // Desactivar estado de generación
       set({ isGenerating: false });
+      
+      return {
+        success: true,
+        model_id,
+        model_url: finalModelUrl
+      };
+    } catch (error) {
+      console.error('Error al generar modelo:', error);
+      set({ isGenerating: false });
+      throw error;
     }
   },
   
