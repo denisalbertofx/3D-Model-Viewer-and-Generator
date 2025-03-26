@@ -5,11 +5,36 @@ import { Suspense, useEffect, useState, useCallback } from 'react';
 import { useStore } from '@/lib/store';
 import * as THREE from 'three';
 import { ModelTransform } from '@/components/scene/ModelEditor';
-import { LoadingSpinner } from '../ui/loading';
 
-const LoadingSpinner = () => {
+// Loading spinner para Three.js (dentro del canvas)
+const ThreeLoadingSpinner = () => {
+  const { camera } = useThree();
+  const [rotation, setRotation] = useState(0);
+
+  useEffect(() => {
+    let animationFrameId: number;
+    const animate = () => {
+      setRotation(prev => (prev + 0.05) % (Math.PI * 2));
+      animationFrameId = requestAnimationFrame(animate);
+    };
+    animate();
+    return () => cancelAnimationFrame(animationFrameId);
+  }, []);
+
   return (
-    <div className="flex items-center justify-center">
+    <group position={[0, 0, -5]} rotation={[0, rotation, 0]}>
+      <mesh>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color="#4f46e5" wireframe />
+      </mesh>
+    </group>
+  );
+};
+
+// Loading spinner para DOM (fuera del canvas)
+const DOMLoadingSpinner = () => {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center">
       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
     </div>
   );
@@ -202,7 +227,7 @@ function ModelViewer({ url, transform, onError }: ModelViewerProps) {
   }, [contextLost, onError]);
 
   if (isLoading) {
-    return <LoadingSpinner />;
+    return <ThreeLoadingSpinner />;
   }
 
   if (!gltfScene) {
@@ -312,9 +337,9 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
           <directionalLight position={[10, 10, 5]} intensity={1} />
           <directionalLight position={[-10, -10, -5]} intensity={0.5} />
           
-          <Suspense fallback={<LoadingSpinner />}>
+          <Suspense fallback={<ThreeLoadingSpinner />}>
             {isGenerating || isLoading ? (
-              <LoadingSpinner />
+              <ThreeLoadingSpinner />
             ) : currentModel?.model_url && !fallbackToDefault && !contextLost ? (
               <ModelViewer
                 url={currentModel.model_url}
@@ -334,6 +359,7 @@ export function ThreeScene({ modelTransform }: ThreeSceneProps) {
           />
         </Canvas>
       </ErrorBoundary>
+      {(isGenerating || !currentModel?.model_url) && <DOMLoadingSpinner />}
     </div>
   );
 }
